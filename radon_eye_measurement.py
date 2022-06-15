@@ -20,23 +20,91 @@
 # * Replace is_connected() 
 
 import asyncio
+from imaplib import Int2AP
 from bleak import *
 from construct import *
 from datetime import datetime
 
-def main():
-    print_debug = False
-    command_line = True # Change to False to print output values as x|x|x|x
-    get_device = True # can be True or False
-    
-    address = "" # copy the device address here
 
-    radon_eye_struct = Struct(
+def TempHumi_u16_to_Temperature(value):
+    i2 = value >> 8
+    if (((value >> 7) & 1) == 1):
+        return i2 +0.5
+    else:
+        return i2
+
+def TempHumi_u16_to_Humidity(value):
+    i2 = (value % 256)
+    if (i2 <= 0):
+        i2 += 256
+    return (i2 % 128)
+
+def print_result(command_line, date_time, data_struct):
+    if data_struct.command == 80:
+        if command_line :
+            
+            print(f'[Measurements] {date_time}')
+            print(f'Current: {data_struct.measurement}')
+            print(f'Avg 1 day: {data_struct.avg_day_measurement}')
+            print(f'Avg 2 day: {data_struct.avg_2_day_measurement}')
+            print(f'Avg Week: {data_struct.avg_week_measurement}')
+            print(f'Avg Month: {data_struct.avg_month_measurement}')
+            print(f'Value peak: {data_struct.value_peak}')
+            print(f'Pulse count: {data_struct.pulse_count}')
+            print(f'Pulse count 10m: {data_struct.pulse_count_10m}')
+
+        else:
+            print(f'{date_time}|{data_struct.measurement}|{data_struct.avg_day_measurement}|\
+            {data_struct.avg_2_day_measurement}|{data_struct.avg_week_measurement}|\
+            {data_struct.avg_month_measurement}|{data_struct.value_peak}|\
+            {data_struct.pulse_count}|{data_struct.pulse_count_10m}')
+    elif data_struct.command == 81:
+
+        temperature = TempHumi_u16_to_Temperature(data_struct.temp_and_hum)
+        humidity = TempHumi_u16_to_Humidity(data_struct.temp_and_hum)
+        if command_line :
+            print(f'[Info] {date_time}')
+            print(f'Device Status: {data_struct.device_status}')
+            print(f'Vib Status: {data_struct.vib_status}')
+            print(f'Proc Time: {data_struct.proc_time}')
+            print(f'DC Value: {data_struct.dc_value}')
+            print(f'Temperature: {temperature}')
+            print(f'Humidity: {humidity}')
+
+        else:
+            print(f'{date_time}|{data_struct.device_status}|{data_struct.vib_status}|\
+            {data_struct.proc_time}|{data_struct.dc_value}|\
+            {data_struct.temperature}|{data_struct.humidity}')
+
+
+def main():
+    print_debug = True
+    command_line = True # Change to False to print output values as x|x|x|x
+    get_device = False # can be True or False
+    
+    address = "C8:2E:5E:F8:9D:EA" # copy the device address here
+
+    p2_measurements = Struct(
             "command" / Int8ul,
             "total_msg_size" / Int8ul,
-            "measurement" / Float32l,
-            "avg_day_measurement" / Float32l,
-            "avg_month_measurement" / Float32l
+            "measurement" / Int16ul,
+            "avg_day_measurement" / Int16ul,
+            "avg_2_day_measurement" / Int16ul,
+            "avg_week_measurement" / Int16ul,
+            "avg_month_measurement" / Int16ul,
+            "value_peak" / Int16ul,
+            "pulse_count" / Int16ul,
+            "pulse_count_10m" / Int16ul,
+    )
+
+    p2_info = Struct(
+            "command" / Int8ul,
+            "total_msg_size" / Int8ul,
+            "device_status" / Int8ul,
+            "vib_status" / Int8ul,
+            "proc_time" / Int32ul,
+            "dc_value" / Int32ul,
+            "temp_and_hum" / Int16ul
     )
 
     now = datetime.now()
@@ -64,42 +132,38 @@ def main():
 
     LBS_UUID_CONTROL = "00001524-1212-EFDE-1523-785FEABCD123"
     READOUT_UUID = "00001525-1212-EFDE-1523-785FEABCD123"
-    if command_line : print("** Radon Eye measurement tracking. **")
+    if command_line : print("** Radon Eye+2 measurement tracking. **")
     async def run(address):
         try:
             async with BleakClient(address) as client:
                 try:
+                    if (not client.is_connected):
+                        await client.connect()
+                    if command_line : print(f'Connected to {address}')
 
-                    x = await client.is_connected()
-                    if command_line : print("Connected: {0}".format(x))
-                    if x :
-                        value_to_send = bytearray([0x50]) # send query command
-                        await client.write_gatt_char(LBS_UUID_CONTROL, value_to_send)
-                        
-                        uuid_results = await client.read_gatt_char(READOUT_UUID)
+                    #Get Measurements
+                    value_to_send = bytearray([0x50]) # send query command
+                    if print_debug: print(f'Send: {value_to_send.hex()}')
+                    await client.write_gatt_char(LBS_UUID_CONTROL, value_to_send)
+                    result = await client.read_gatt_char(READOUT_UUID)
+                    if print_debug: print(f'Result: {result.hex()}')
+                    p2_measurements_parsed = p2_measurements.parse(result)
 
-                        if print_debug: print("Debug message: Read GATT returned (hex): {}".format(uuid_results.hex()))
-
-                        radon_eye_struct_ = radon_eye_struct.parse(uuid_results)
-                        if radon_eye_struct_.command == 80:
-                            measurement_calc = radon_eye_struct_.measurement * 37
-                            avg_day_measurement_calc = radon_eye_struct_.avg_day_measurement * 37
-                            avg_month_measurement_calc = radon_eye_struct_.avg_month_measurement * 37
-                            if command_line :
-                                date_time = now.strftime("%Y/%m/%d, %H:%M:%S")
-                                print("YYYY/MM/DD, HH:MM:SS : measurement ")
-                                print("{} : {:.2f}".format(date_time,measurement_calc))
-                                print("YYYY/MM/DD, HH:MM:SS : Day measurement (average) ")
-                                print("{} : {:.2f}".format(date_time,avg_day_measurement_calc))
-                                print("YYYY/MM/DD, HH:MM:SS : Month measurement (average) ")
-                                print("{} : {:.2f}".format(date_time,avg_month_measurement_calc))
-                            else:
-                                date_time = now.strftime("%Y/%m/%d|%H:%M:%S")
-                                print("{}|{:.2f}|{:.2f}|{:.2f}".format(date_time,measurement_calc,avg_day_measurement_calc,avg_month_measurement_calc))
+                    #Get Info
+                    value_to_send = bytearray([0x51]) # send query command
+                    if print_debug: print(f'Send: {value_to_send.hex()}')
+                    await client.write_gatt_char(LBS_UUID_CONTROL, value_to_send)
+                    result = await client.read_gatt_char(READOUT_UUID)
+                    if print_debug: print(f'Result: {result.hex()}')
+                    p2_info_parsed = p2_info.parse(result)
+                    
+                    date_time = now.strftime("%Y/%m/%d, %H:%M:%S")
+                    print_result(command_line, date_time, p2_measurements_parsed)
+                    print_result(command_line, date_time, p2_info_parsed)
                 finally:
                     await client.disconnect()
-        except:
-            print("[-] Failed to connect to {}".format(address))
+        except Exception as e:
+            print(f"[-] Failed to connect to {address}. Exception: {e}")
     loop = asyncio.get_event_loop()
     loop.run_until_complete(run(address))
 
